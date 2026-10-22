@@ -17,30 +17,35 @@
 
 package org.apache.hugegraph.core;
 
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import org.apache.commons.configuration2.BaseConfiguration;
 import org.apache.commons.configuration2.Configuration;
 import org.apache.commons.configuration2.PropertiesConfiguration;
-import org.apache.hugegraph.HugeException;
+import org.apache.hugegraph.exception.HugeException;
 import org.apache.hugegraph.HugeGraph;
-import org.apache.hugegraph.backend.id.IdGenerator;
+import org.apache.hugegraph.id.IdGenerator;
 import org.apache.hugegraph.backend.store.BackendStoreInfo;
 import org.apache.hugegraph.backend.store.rocksdb.RocksDBOptions;
+import org.apache.hugegraph.backend.tx.IdCounter;
 import org.apache.hugegraph.config.CoreOptions;
 import org.apache.hugegraph.exception.ExistedException;
 import org.apache.hugegraph.masterelection.GlobalMasterInfo;
-import org.apache.hugegraph.schema.EdgeLabel;
-import org.apache.hugegraph.schema.IndexLabel;
-import org.apache.hugegraph.schema.PropertyKey;
+import org.apache.hugegraph.struct.schema.EdgeLabel;
+import org.apache.hugegraph.struct.schema.IndexLabel;
+import org.apache.hugegraph.struct.schema.PropertyKey;
 import org.apache.hugegraph.schema.SchemaManager;
-import org.apache.hugegraph.schema.VertexLabel;
+import org.apache.hugegraph.struct.schema.VertexLabel;
 import org.apache.hugegraph.testutil.Assert;
 import org.apache.hugegraph.testutil.Utils;
+import org.apache.hugegraph.testutil.Whitebox;
+import org.apache.hugegraph.type.HugeType;
 import org.apache.tinkerpop.gremlin.structure.T;
 import org.apache.tinkerpop.gremlin.structure.Vertex;
 import org.apache.tinkerpop.gremlin.structure.util.GraphFactory;
@@ -114,6 +119,51 @@ public class MultiGraphsTest extends BaseCoreTest {
             graph.addVertex(T.label, "person", "name", "marko");
             graph.tx().commit();
             Assert.assertEquals(1L, graph.traversal().V().count().next());
+
+            graph.clearBackend();
+        } finally {
+            destroyGraphs(ImmutableList.of(graph));
+        }
+    }
+
+    @Test
+    public void testHstoreTruncateBackendKeepsSchemaIdCounters() {
+        Assume.assumeTrue("only hstore keeps the schema id counters in PD",
+                          "hstore".equals(graph().backend()));
+
+        HugeGraph graph = openGraphs("truncate_hs").get(0);
+        try {
+            graph.clearBackend();
+            graph.initBackend();
+            graph.serverStarted(GlobalMasterInfo.master("server-truncate"));
+
+            SchemaManager schema = graph.schema();
+            PropertyKey name = schema.propertyKey("name").asText().create();
+
+            graph.truncateBackend();
+
+            // The schema lives in PD meta and survives the truncate
+            Assert.assertEquals(name.id(), schema.getPropertyKey("name").id());
+
+            // Another Server holds no cached id range, it asks PD for one: drop
+            // the range this process cached for the graph's property key
+            // counter, under the key the counter itself builds
+            Object schemaTx = Whitebox.invoke(graph.getClass(),
+                                              "schemaTransaction", graph);
+            IdCounter counter = Whitebox.getInternalState(schemaTx, "idCounter");
+            String key = Whitebox.invoke(IdCounter.class,
+                                         new Class<?>[]{String.class,
+                                                        HugeType.class},
+                                         "toKey", counter,
+                                         Whitebox.getInternalState(counter,
+                                                                   "graphName"),
+                                         HugeType.PROPERTY_KEY);
+            Map<String, ?> ranges = Whitebox.getInternalState(IdCounter.class, "ids");
+            Assert.assertNotNull(ranges.remove(key));
+
+            PropertyKey age = schema.propertyKey("age").asInt().create();
+            Assert.assertTrue(String.format("id %s reused after %s", age.id(), name.id()),
+                              age.id().asLong() > name.id().asLong());
 
             graph.clearBackend();
         } finally {
@@ -373,7 +423,7 @@ public class MultiGraphsTest extends BaseCoreTest {
     }
 
     @Test
-    public void testOpenGraphWithDeprecatedTaskSchedulerType() {
+    public void testOpenGraphWithRemovedTaskSchedulerType() {
         HugeGraph graph = openGraphWithBackend("legacySchedulerType",
                                                "rocksdb", "binary",
                                                "task.scheduler_type", "local");
@@ -396,12 +446,14 @@ public class MultiGraphsTest extends BaseCoreTest {
                                          "[g/range_int_index:rocksdb-index1]");
             g2[0].initBackend();
         }, e -> {
-            Throwable root = HugeException.rootCause(e);
-            Assert.assertInstanceOf(RocksDBException.class, root);
+            RocksDBException failure = rocksDBCause(e);
+            Assert.assertNotNull(failure.getCause());
             Assert.assertContains("lock hold by current process",
-                                  root.getMessage());
+                                  failure.getMessage());
             Assert.assertContains("No locks available",
-                                  root.getMessage());
+                                  failure.getMessage());
+            Assert.assertInstanceOf(OverlappingFileLockException.class,
+                                    HugeException.rootCause(failure));
         });
 
         final HugeGraph[] g3 = new HugeGraph[1];
@@ -411,13 +463,23 @@ public class MultiGraphsTest extends BaseCoreTest {
                                          "[g/secondary_index:/]");
             g3[0].initBackend();
         }, e -> {
-            Throwable root = HugeException.rootCause(e);
-            Assert.assertInstanceOf(RocksDBException.class, root);
-            Assert.assertContains("While mkdir if missing",
-                                  root.getMessage());
+            RocksDBException failure = rocksDBCause(e);
+            Assert.assertNotNull(failure.getCause());
+            Assert.assertContains("Cannot lock database for open/recovery",
+                                  failure.getMessage());
+            Assert.assertContains("/g", failure.getMessage());
         });
 
         destroyGraphs(ImmutableList.of(g1));
+    }
+
+    private static RocksDBException rocksDBCause(Throwable exception) {
+        Throwable cause = exception;
+        while (cause != null && !(cause instanceof RocksDBException)) {
+            cause = cause.getCause();
+        }
+        Assert.assertInstanceOf(RocksDBException.class, cause);
+        return (RocksDBException) cause;
     }
 
     private static List<HugeGraph> openGraphs(String... graphNames) {

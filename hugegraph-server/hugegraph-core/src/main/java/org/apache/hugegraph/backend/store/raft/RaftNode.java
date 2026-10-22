@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.hugegraph.backend.BackendException;
+import org.apache.hugegraph.exception.BackendException;
 import org.apache.hugegraph.util.LZ4Util;
 import org.apache.hugegraph.util.Log;
 import org.slf4j.Logger;
@@ -99,15 +99,15 @@ public final class RaftNode {
         LOG.info("Shutdown raft node: {}", this);
         this.node.shutdown();
 
-        if (this.raftGroupService != null) {
-            this.raftGroupService.shutdown();
-            try {
-                this.raftGroupService.join();
-            } catch (final InterruptedException e) {
-                throw new RaftException(
-                        "Interrupted while shutdown raftGroupService");
-            }
+        // RaftGroupService.shutdown() also removes the shared server address.
+        // Close only this node; GraphManager owns the shared listener and address.
+        try {
+            this.node.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RaftException("Interrupted while shutting down raft node", e);
         }
+        this.raftGroupService = null;
     }
 
     public RaftClosure<?> snapshot() {

@@ -30,24 +30,24 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
 
-import org.apache.hugegraph.HugeException;
+import org.apache.hugegraph.exception.HugeException;
 import org.apache.hugegraph.HugeGraph;
-import org.apache.hugegraph.backend.BackendException;
-import org.apache.hugegraph.backend.id.Id;
-import org.apache.hugegraph.backend.id.IdGenerator;
+import org.apache.hugegraph.exception.BackendException;
+import org.apache.hugegraph.id.Id;
+import org.apache.hugegraph.id.IdGenerator;
 import org.apache.hugegraph.backend.page.PageInfo;
-import org.apache.hugegraph.backend.query.Condition;
-import org.apache.hugegraph.backend.query.ConditionQuery;
-import org.apache.hugegraph.backend.query.Query;
-import org.apache.hugegraph.backend.serializer.BytesBuffer;
+import org.apache.hugegraph.query.Condition;
+import org.apache.hugegraph.query.ConditionQuery;
+import org.apache.hugegraph.query.Query;
+import org.apache.hugegraph.serializer.BytesBuffer;
 import org.apache.hugegraph.backend.store.BackendTable;
-import org.apache.hugegraph.backend.store.Shard;
+import org.apache.hugegraph.backend.Shard;
 import org.apache.hugegraph.backend.tx.GraphTransaction;
 import org.apache.hugegraph.config.CoreOptions;
 import org.apache.hugegraph.exception.LimitExceedException;
 import org.apache.hugegraph.exception.NoIndexException;
 import org.apache.hugegraph.schema.SchemaManager;
-import org.apache.hugegraph.schema.Userdata;
+import org.apache.hugegraph.struct.schema.Userdata;
 import org.apache.hugegraph.structure.HugeEdge;
 import org.apache.hugegraph.structure.HugeVertex;
 import org.apache.hugegraph.testutil.Assert;
@@ -211,6 +211,48 @@ public class EdgeCoreTest extends BaseCoreTest {
               .by("tool").create();
         schema.indexLabel("strikeByPlaceToolReason").onE("strike").secondary()
               .by("place", "tool", "reason").create();
+    }
+
+    @Test
+    public void testDeleteEdgeWithMissingSchemaLabel() throws InterruptedException, ExecutionException {
+        HugeGraph graph = graph();
+        Vertex author = graph.addVertex(T.label, "author", "id", 1, "name", "James",
+                                        "age", 62, "lived", "Canadian");
+        Vertex book = graph.addVertex(T.label, "book", "name", "Java");
+        Edge edge = author.addEdge("authored", book, "score", 3);
+        graph.tx().commit();
+
+        // Preserve the backend edge while removing its schema metadata.
+        params().schemaTransaction().removeSchema(graph.edgeLabel("authored"));
+        params().graphEventHub().notify(Events.CACHE, "clear", null).get();
+        Edge orphan = graph.edges(edge.id()).next();
+        Assert.assertEquals("~undefined", orphan.label());
+
+        orphan.remove();
+        graph.tx().commit();
+        Assert.assertFalse(graph.edges(edge.id()).hasNext());
+        Assert.assertFalse(graph.vertices(author.id()).next().edges(Direction.OUT).hasNext());
+        Assert.assertFalse(graph.vertices(book.id()).next().edges(Direction.IN).hasNext());
+    }
+
+    @Test
+    public void testDeleteVertexAdjacentToEdgeWithMissingSchemaLabel() throws InterruptedException, ExecutionException {
+        HugeGraph graph = graph();
+        Vertex author = graph.addVertex(T.label, "author", "id", 1, "name", "James",
+                                        "age", 62, "lived", "Canadian");
+        Vertex book = graph.addVertex(T.label, "book", "name", "Java");
+        Edge edge = author.addEdge("authored", book, "score", 3);
+        graph.tx().commit();
+
+        params().schemaTransaction().removeSchema(graph.edgeLabel("authored"));
+        params().graphEventHub().notify(Events.CACHE, "clear", null).get();
+        Assert.assertEquals("~undefined", graph.edges(edge.id()).next().label());
+
+        graph.vertices(author.id()).next().remove();
+        graph.tx().commit();
+        Assert.assertFalse(graph.vertices(author.id()).hasNext());
+        Assert.assertFalse(graph.edges(edge.id()).hasNext());
+        Assert.assertFalse(graph.vertices(book.id()).next().edges(Direction.IN).hasNext());
     }
 
     @Test
@@ -755,7 +797,7 @@ public class EdgeCoreTest extends BaseCoreTest {
                                  "date", "2019-12-23 12:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", "library of school");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
@@ -767,7 +809,7 @@ public class EdgeCoreTest extends BaseCoreTest {
             // Ignore
         }
 
-        edges = graph().traversal().E().has("place", "library of school");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school");
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -797,27 +839,27 @@ public class EdgeCoreTest extends BaseCoreTest {
                                   "date", "2019-12-23 16:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge3, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge5, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge1, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -829,22 +871,22 @@ public class EdgeCoreTest extends BaseCoreTest {
             // Ignore
         }
 
-        edges = graph().traversal().E().has("date", "2019-12-23 14:00:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -878,31 +920,31 @@ public class EdgeCoreTest extends BaseCoreTest {
                                   "date", "2019-12-23 14:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E().has("place", "home");
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge6, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge3, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge5, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge1, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -914,26 +956,26 @@ public class EdgeCoreTest extends BaseCoreTest {
             // Ignore
         }
 
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -951,7 +993,7 @@ public class EdgeCoreTest extends BaseCoreTest {
                                  "date", "2019-12-23 12:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", Text.contains("library"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
@@ -963,7 +1005,7 @@ public class EdgeCoreTest extends BaseCoreTest {
             // Ignore
         }
 
-        edges = graph().traversal().E().has("place", Text.contains("library"));
+        edges = graph().traversal().E().hasLabel("read").has("place", Text.contains("library"));
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -1010,7 +1052,7 @@ public class EdgeCoreTest extends BaseCoreTest {
                                  "date", "2019-12-23 12:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", "library of school");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
@@ -1028,10 +1070,10 @@ public class EdgeCoreTest extends BaseCoreTest {
         graph().tx().commit();
 
         // Due to overridden edges are expired, query will lead to async delete
-        edges = graph().traversal().E().has("place", "library of school");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
         graph().tx().commit();
@@ -1043,9 +1085,9 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 6s
-        edges = graph().traversal().E().has("place", "library of school");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school");
         Assert.assertFalse(edges.hasNext());
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -1075,27 +1117,27 @@ public class EdgeCoreTest extends BaseCoreTest {
                                   "date", "2019-12-23 16:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge3, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge5, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge1, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1123,29 +1165,29 @@ public class EdgeCoreTest extends BaseCoreTest {
                                    "date", "2019-12-23 16:01:00");
         graph().tx().commit();
         // Due to overridden edges are expired, query will lead to async delete
-        edges = graph().traversal().E().has("date", "2019-12-23 14:00:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("date", "2019-12-23 14:01:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:01:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge8, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge10, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge6, edges.next());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1158,25 +1200,25 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 6s
-        edges = graph().traversal().E().has("date", "2019-12-23 14:00:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("date", "2019-12-23 14:01:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:01:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:01:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:01:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:01:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:01:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -1210,31 +1252,31 @@ public class EdgeCoreTest extends BaseCoreTest {
                                   "date", "2019-12-23 14:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E().has("place", "home");
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge6, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge3, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge5, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge1, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1265,38 +1307,38 @@ public class EdgeCoreTest extends BaseCoreTest {
         graph().tx().commit();
 
         // Due to overridden edges are expired, query will lead to async delete
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge12, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:01:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge9, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge11, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge7, edges.next());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:01:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1309,33 +1351,33 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 6s
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:01:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -1353,7 +1395,7 @@ public class EdgeCoreTest extends BaseCoreTest {
                                  "date", "2019-12-23 12:00:00");
         graph().tx().commit();
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", Text.contains("school"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
@@ -1370,10 +1412,10 @@ public class EdgeCoreTest extends BaseCoreTest {
         graph().tx().commit();
 
         // Due to overridden edges are expired, query will lead to async delete
-        edges = graph().traversal().E().has("place", Text.contains("school"));
+        edges = graph().traversal().E().hasLabel("read").has("place", Text.contains("school"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", Text.contains("city"));
+        edges = graph().traversal().E().hasLabel("read").has("place", Text.contains("city"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(edge, edges.next());
         graph().tx().commit();
@@ -1385,7 +1427,7 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 6s
-        edges = graph().traversal().E().has("place", Text.contains("library"));
+        edges = graph().traversal().E().hasLabel("read").has("place", Text.contains("library"));
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -1445,7 +1487,7 @@ public class EdgeCoreTest extends BaseCoreTest {
         baby.addEdge("read", java2, "place", "library of school",
                      "date", "2019-12-23 12:00:00");
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", "library of school");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1458,7 +1500,7 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 3s
-        edges = graph().traversal().E().has("place", "library of school");
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school");
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -1503,27 +1545,27 @@ public class EdgeCoreTest extends BaseCoreTest {
         baby.addEdge("read", java10, "place", "library of school",
                      "date", "2019-12-23 16:00:00");
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(4, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(4, IteratorUtils.count(edges));
@@ -1536,22 +1578,22 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 3s
-        edges = graph().traversal().E().has("date", "2019-12-23 14:00:00");
+        edges = graph().traversal().E().hasLabel("read").has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E()
+        edges = graph().traversal().E().hasLabel("read")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -1603,31 +1645,31 @@ public class EdgeCoreTest extends BaseCoreTest {
         baby.addEdge("read", java12, "place", "home",
                      "date", "2019-12-23 14:00:00");
 
-        Iterator<Edge> edges = graph().traversal().E().has("place", "home");
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(4, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(4, IteratorUtils.count(edges));
@@ -1640,26 +1682,26 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 3s
-        edges = graph().traversal().E().has("place", "home");
+        edges = graph().traversal().E().hasLabel("read").has("place", "home");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", "2019-12-23 14:00:00");
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gt("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.gte("2019-12-23 15:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lt("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
 
-        edges = graph().traversal().E().has("place", "library of school")
+        edges = graph().traversal().E().hasLabel("read").has("place", "library of school")
                        .has("date", P.lte("2019-12-23 13:00:00"));
         Assert.assertFalse(edges.hasNext());
     }
@@ -1682,7 +1724,7 @@ public class EdgeCoreTest extends BaseCoreTest {
         baby.addEdge("read", java2, "place", "library of school",
                      "date", "2019-12-23 12:00:00");
 
-        Iterator<Edge> edges = graph().traversal().E()
+        Iterator<Edge> edges = graph().traversal().E().hasLabel("read")
                                       .has("place", Text.contains("library"));
         Assert.assertTrue(edges.hasNext());
         Assert.assertEquals(2, IteratorUtils.count(edges));
@@ -1695,7 +1737,7 @@ public class EdgeCoreTest extends BaseCoreTest {
         }
 
         // All edges are expired after 3s
-        edges = graph().traversal().E().has("place", Text.contains("library"));
+        edges = graph().traversal().E().hasLabel("read").has("place", Text.contains("library"));
         Assert.assertFalse(edges.hasNext());
     }
 
@@ -3176,9 +3218,7 @@ public class EdgeCoreTest extends BaseCoreTest {
 
         // Fill edge properties
         Assert.assertEquals(2, edge.getProperties().size());
-        Whitebox.setInternalState(edge, "propLoaded", false);
-        Whitebox.setInternalState(edge, "properties",
-                                  CollectionFactory.newIntObjectMap());
+        edge.resetProperties();
         Assert.assertEquals(0, edge.getProperties().size());
         Assert.assertEquals(2, edge.getFilledProperties().size());
         Assert.assertEquals(2, edge.getProperties().size());
@@ -3557,6 +3597,265 @@ public class EdgeCoreTest extends BaseCoreTest {
                      .has("time", "2017-5-27").has("score", 3)
                      .toList();
         Assert.assertEquals(0, edges.size());
+    }
+
+    @Test
+    public void testQueryOutEdgesBySingleResolvedLabelAndSortKey() {
+        HugeGraph graph = graph();
+        Vertex reader = initEdgeLabelQueryEdges();
+
+        List<Edge> edges = graph.traversal().V(reader.id())
+                                .outE("reviewed")
+                                .has(T.label, P.within("reviewed",
+                                                       "recommended"))
+                                .has("time", "2026-1-1")
+                                .toList();
+
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("reviewed", edges.get(0).label());
+        Assert.assertEquals("2026-1-1", edges.get(0).value("time"));
+    }
+
+    @Test
+    public void testQueryOutEdgesByMultiLabelsAndSortKey() {
+        HugeGraph graph = graph();
+        Vertex reader = initEdgeLabelQueryEdges();
+
+        List<Edge> edges = graph.traversal().V(reader.id())
+                                .outE("reviewed", "recommended")
+                                .has("time", "2026-1-1")
+                                .toList();
+
+        Set<String> labels = new HashSet<>();
+        for (Edge edge : edges) {
+            labels.add(edge.label());
+            Assert.assertEquals("2026-1-1", edge.value("time"));
+        }
+        Assert.assertEquals(2, edges.size());
+        Assert.assertEquals(ImmutableSet.of("reviewed", "recommended"),
+                            labels);
+    }
+
+    @Test
+    public void testQueryEdgesByNonEqLabel() {
+        HugeGraph graph = graph();
+        init18Edges();
+
+        List<Edge> edges = graph.traversal().E()
+                                .has(T.label, P.neq("created"))
+                                .toList();
+        Assert.assertEquals(16, edges.size());
+        for (Edge edge : edges) {
+            Assert.assertNotEquals("created", edge.label());
+        }
+    }
+
+    @Test
+    public void testPageOutEdgesWithNegativeLabelBeforeLimit() {
+        this.assertOutEdgeNegativeLabelPages(true);
+    }
+
+    @Test
+    public void testPageOutEdgesWithNegativeLabelAfterLimit() {
+        this.assertOutEdgeNegativeLabelPages(false);
+    }
+
+    private void assertOutEdgeNegativeLabelPages(boolean filterBeforeLimit) {
+        Assume.assumeTrue("Not support paging", storeFeatures().supportsQueryByPage());
+        HugeGraph graph = graph();
+        graph.schema().vertexLabel("pageVertex").useCustomizeNumberId().create();
+        graph.schema().edgeLabel("pageExcluded").link("pageVertex", "pageVertex").create();
+        graph.schema().edgeLabel("pageIncluded").link("pageVertex", "pageVertex").create();
+        Vertex source = graph.addVertex(T.label, "pageVertex", T.id, 1);
+        Set<Object> expected = new HashSet<>();
+        for (int i = 0; i < 9; i++) {
+            Vertex target = graph.addVertex(T.label, "pageVertex", T.id, i + 2);
+            Edge edge = source.addEdge(i < 6 ? "pageExcluded" : "pageIncluded", target);
+            if (i >= 6) {
+                expected.add(edge.id());
+            }
+        }
+        this.commitTx();
+
+        Set<Object> actual = new HashSet<>();
+        Set<String> cursors = new HashSet<>();
+        String page = "";
+        int pages = 0;
+        boolean emptyPageWithCursor = false;
+        do {
+            GraphTraversal<Vertex, Edge> traversal = graph.traversal().V(source.id())
+                                                         .outE().has("~page", page);
+            if (filterBeforeLimit) {
+                traversal.hasLabel(P.neq("pageExcluded")).limit(1);
+            } else {
+                traversal.limit(1).hasLabel(P.neq("pageExcluded"));
+            }
+            traversal.asAdmin().applyStrategies();
+            Assert.assertNotNull(TraversalUtil.firstPageStep(traversal));
+            List<Edge> edges = traversal.toList();
+            Assert.assertTrue(edges.size() <= 1);
+            for (Edge edge : edges) {
+                Assert.assertEquals("pageIncluded", edge.label());
+                Assert.assertTrue("Duplicate edge across pages", actual.add(edge.id()));
+            }
+            page = TraversalUtil.page(traversal);
+            if (page != null && !page.isEmpty()) {
+                Assert.assertTrue("Repeated continuation cursor", cursors.add(page));
+                emptyPageWithCursor |= edges.isEmpty();
+            }
+            Assert.assertTrue("Paging did not terminate", ++pages <= 10);
+        } while (page != null && !page.isEmpty());
+        Assert.assertEquals(expected, actual);
+        // An empty filtered page must not terminate iteration prematurely.
+        Assert.assertTrue(emptyPageWithCursor);
+    }
+
+    @Test
+    public void testLocalEdgeIdAndLabelRepresentations() {
+        HugeGraph graph = graph();
+        graph.schema().vertexLabel("localEV").useCustomizeNumberId().create();
+        graph.schema().edgeLabel("localE").link("localEV", "localEV").create();
+        Vertex source = graph.addVertex(T.label, "localEV", T.id, 123);
+        Vertex target = graph.addVertex(T.label, "localEV", T.id, 456);
+        Edge edge = source.addEdge("localE", target);
+        this.commitTx();
+        GraphTraversalSource g = graph.traversal();
+        Assert.assertEquals(ImmutableList.of(edge), g.E().hasId(edge).toList());
+        Assert.assertEquals(ImmutableList.of(edge),
+                            g.E().hasId(edge).limit(10).hasLabel(P.neq("other")).toList());
+        Assert.assertEquals(ImmutableList.of(edge),
+                            g.V(source.id()).outE().hasId(P.within(edge)).limit(10)
+                             .hasLabel(P.neq("other")).toList());
+        Id label = graph.edgeLabel("localE").id();
+        for (Object value : ImmutableList.of("localE", label, label.asLong())) {
+            Assert.assertEquals(ImmutableList.of(edge), g.E().has(T.label, value).toList());
+            Assert.assertEquals(ImmutableList.of(edge),
+                                g.E().has(T.label, value).limit(10)
+                                 .hasLabel(P.neq("other")).toList());
+            Assert.assertEquals(ImmutableList.of(edge),
+                                g.V(source.id()).outE().barrier().has(T.label, P.within(value)).limit(10)
+                                 .hasLabel(P.neq("other")).toList());
+        }
+    }
+
+    @Test
+    public void testQueryEdgesByNonEqLabelAndIndexedPropertyAcrossBarrier() {
+        HugeGraph graph = graph();
+        initEdgeLabelQueryEdges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E().has(T.label, P.neq("reviewed"))
+                            .barrier().has("score", 2).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+
+        edges = g.E().has("score", 2).barrier()
+                 .has(T.label, P.neq("reviewed")).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+    }
+
+    @Test
+    public void testQueryEdgesByNonEqLabelAndIndexedPropertyAcrossRange() {
+        HugeGraph graph = graph();
+        initEdgeLabelQueryEdges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E().has("score", 2).skip(0)
+                            .has(T.label, P.neq("reviewed")).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+
+        edges = g.E().has("score", 2).limit(1000)
+                 .has(T.label, P.neq("reviewed")).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+    }
+
+    @Test
+    public void testQueryEdgesByNonEqLabelAndIndexedPropertyAcrossMixedKeyOr() {
+        HugeGraph graph = graph();
+        initEdgeLabelQueryEdges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E().has("score", 2)
+                            .or(__.has(T.label, P.neq("reviewed")),
+                                __.has("time", "2026-1-1"))
+                            .toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+    }
+
+    @Test
+    public void testQueryEdgesByNonEqLabelAndIndexedPropertyAcrossSideEffect() {
+        HugeGraph graph = graph();
+        initEdgeLabelQueryEdges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E().has("score", 2).aggregate("x")
+                            .has(T.label, P.neq("reviewed")).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+
+        edges = g.E().has("score", 2).coin(1.0D)
+                 .has(T.label, P.neq("reviewed")).toList();
+        Assert.assertEquals(1, edges.size());
+        Assert.assertEquals("recommended", edges.get(0).label());
+    }
+
+    @Test
+    public void testQueryEdgesByMixedConnectiveLabel() {
+        HugeGraph graph = graph();
+        init18Edges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E()
+                            .has(T.label, P.eq("created")
+                                           .or(P.neq("authored")))
+                            .toList();
+        Assert.assertEquals(15, edges.size());
+        for (Edge edge : edges) {
+            Assert.assertNotEquals("authored", edge.label());
+        }
+
+        edges = g.E()
+                 .has(T.label, P.eq("created")
+                                .and(P.neq("authored")))
+                 .toList();
+        Assert.assertEquals(2, edges.size());
+        for (Edge edge : edges) {
+            Assert.assertEquals("created", edge.label());
+        }
+    }
+
+    @Test
+    public void testQueryEdgesByMultipleNegativeLabelContainers() {
+        HugeGraph graph = graph();
+        init18Edges();
+
+        GraphTraversalSource g = graph.traversal();
+
+        List<Edge> edges = g.E().hasLabel("created")
+                            .has(T.label, P.neq("authored"))
+                            .toList();
+        Assert.assertEquals(2, edges.size());
+        for (Edge edge : edges) {
+            Assert.assertEquals("created", edge.label());
+        }
+
+        edges = g.E().has(T.label, P.neq("created"))
+                 .has(T.label, P.neq("authored"))
+                 .toList();
+        Assert.assertEquals(13, edges.size());
+        for (Edge edge : edges) {
+            Assert.assertNotEquals("created", edge.label());
+            Assert.assertNotEquals("authored", edge.label());
+        }
     }
 
     @Test
@@ -4729,10 +5028,10 @@ public class EdgeCoreTest extends BaseCoreTest {
         louise.addEdge("strike", sean, "id", 1, "timestamp", current + 1,
                        "place", "park", "tool", "shovel", "reason", "jeer",
                        "arrested", false);
-        List<Edge> edges = graph.traversal().E().has("timestamp", current)
+        List<Edge> edges = graph.traversal().E().hasLabel("strike").has("timestamp", current)
                                 .toList();
         Assert.assertEquals(0, edges.size());
-        edges = graph.traversal().E().has("timestamp", current + 1).toList();
+        edges = graph.traversal().E().hasLabel("strike").has("timestamp", current + 1).toList();
         Assert.assertEquals(1, edges.size());
     }
 
@@ -4758,36 +5057,36 @@ public class EdgeCoreTest extends BaseCoreTest {
 
         graph.tx().commit();
 
-        List<Edge> edges = graph.traversal().E()
+        List<Edge> edges = graph.traversal().E().hasLabel("transfer")
                                 .has("timestamp", -100L).toList();
         Assert.assertEquals(1, edges.size());
         Assert.assertEquals(IdGenerator.of(2), edges.get(0).value("id"));
 
-        edges = graph.traversal().E()
+        edges = graph.traversal().E().hasLabel("transfer")
                      .has("timestamp", P.between(-101L, 0L))
                      .toList();
         Assert.assertEquals(1, edges.size());
         Assert.assertEquals(IdGenerator.of(2), edges.get(0).value("id"));
 
-        edges = graph.traversal().E().has("timestamp", P.gt(-101L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.gt(-101L)).toList();
         Assert.assertEquals(2, edges.size());
 
-        edges = graph.traversal().E().has("timestamp", P.gte(-100L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.gte(-100L)).toList();
         Assert.assertEquals(2, edges.size());
 
-        edges = graph.traversal().E().has("timestamp", P.gt(-100L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.gt(-100L)).toList();
         Assert.assertEquals(1, edges.size());
         Assert.assertEquals(IdGenerator.of(1), edges.get(0).value("id"));
 
-        edges = graph.traversal().E().has("timestamp", P.gt(-99L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.gt(-99L)).toList();
         Assert.assertEquals(1, edges.size());
         Assert.assertEquals(IdGenerator.of(1), edges.get(0).value("id"));
 
-        edges = graph.traversal().E().has("timestamp", P.lt(-100L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.lt(-100L)).toList();
         Assert.assertEquals(0, edges.size());
-        edges = graph.traversal().E().has("timestamp", P.lte(-100L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.lte(-100L)).toList();
         Assert.assertEquals(1, edges.size());
-        edges = graph.traversal().E().has("timestamp", P.lt(0L)).toList();
+        edges = graph.traversal().E().hasLabel("transfer").has("timestamp", P.lt(0L)).toList();
         Assert.assertEquals(1, edges.size());
     }
 
@@ -4807,17 +5106,17 @@ public class EdgeCoreTest extends BaseCoreTest {
                        "timestamp", -4L, "message", "test");
         graph.tx().commit();
 
-        List<Edge> edges = graph.traversal().E()
+        List<Edge> edges = graph.traversal().E().hasLabel("transfer")
                                 .has("timestamp", -4L)
                                 .has("timestamp", P.lte(4L)).toList();
         Assert.assertEquals(1, edges.size());
 
-        long count = graph.traversal().E()
+        long count = graph.traversal().E().hasLabel("transfer")
                           .has("timestamp", -4L)
                           .has("timestamp", P.lte(4L)).count().next();
         Assert.assertEquals(1L, count);
 
-        count = graph.traversal().E()
+        count = graph.traversal().E().hasLabel("transfer")
                      .has("timestamp", P.lte(4L))
                      .has("timestamp", -4L).count().next();
         Assert.assertEquals(1L, count);
@@ -7081,10 +7380,10 @@ public class EdgeCoreTest extends BaseCoreTest {
         louise.addEdge("strike", sean, "id", 1, "timestamp", current,
                        "place", "street", "tool", "shovel", "reason", "jeer",
                        "arrested", false);
-        List<Edge> edges = graph.traversal().E().has("place", "park")
+        List<Edge> edges = graph.traversal().E().hasLabel("strike").has("place", "park")
                                 .toList();
         Assert.assertEquals(0, edges.size());
-        edges = graph.traversal().E().has("place", "street").toList();
+        edges = graph.traversal().E().hasLabel("strike").has("place", "street").toList();
         Assert.assertEquals(1, edges.size());
     }
 
@@ -7103,28 +7402,28 @@ public class EdgeCoreTest extends BaseCoreTest {
                                    "tool", "shovel", "reason", "jeer",
                                    "arrested", false);
 
-        List<Edge> vl = graph.traversal().E().has("tool", "shovel").toList();
+        List<Edge> vl = graph.traversal().E().hasLabel("strike").has("tool", "shovel").toList();
         Assert.assertEquals(1, vl.size());
         Assert.assertEquals(1, (int) vl.get(0).value("id"));
-        vl = graph.traversal().E().has("timestamp", current).toList();
+        vl = graph.traversal().E().hasLabel("strike").has("timestamp", current).toList();
         Assert.assertEquals(1, vl.size());
         Assert.assertEquals(1, (int) vl.get(0).value("id"));
-        vl = graph.traversal().E().has("tool", "knife").toList();
+        vl = graph.traversal().E().hasLabel("strike").has("tool", "knife").toList();
         Assert.assertEquals(0, vl.size());
-        vl = graph.traversal().E().has("timestamp", 666L).toList();
+        vl = graph.traversal().E().hasLabel("strike").has("timestamp", 666L).toList();
         Assert.assertEquals(0, vl.size());
 
         edge.property("tool", "knife");
         edge.property("timestamp", 666L);
 
-        vl = graph.traversal().E().has("tool", "shovel").toList();
+        vl = graph.traversal().E().hasLabel("strike").has("tool", "shovel").toList();
         Assert.assertEquals(0, vl.size());
-        vl = graph.traversal().E().has("timestamp", current).toList();
+        vl = graph.traversal().E().hasLabel("strike").has("timestamp", current).toList();
         Assert.assertEquals(0, vl.size());
-        vl = graph.traversal().E().has("tool", "knife").toList();
+        vl = graph.traversal().E().hasLabel("strike").has("tool", "knife").toList();
         Assert.assertEquals(1, vl.size());
         Assert.assertEquals(1, (int) vl.get(0).value("id"));
-        vl = graph.traversal().E().has("timestamp", 666L).toList();
+        vl = graph.traversal().E().hasLabel("strike").has("timestamp", 666L).toList();
         Assert.assertEquals(1, vl.size());
         Assert.assertEquals(1, (int) vl.get(0).value("id"));
     }
@@ -7175,18 +7474,18 @@ public class EdgeCoreTest extends BaseCoreTest {
                                    "tool", "shovel", "reason", "jeer",
                                    "arrested", false);
 
-        List<Edge> el = graph.traversal().E().has("timestamp", current)
+        List<Edge> el = graph.traversal().E().hasLabel("strike").has("timestamp", current)
                              .toList();
         Assert.assertEquals(1, el.size());
         Assert.assertEquals(1, (int) el.get(0).value("id"));
-        el = graph.traversal().E().has("timestamp", 666L).toList();
+        el = graph.traversal().E().hasLabel("strike").has("timestamp", 666L).toList();
         Assert.assertEquals(0, el.size());
 
         edge.property("timestamp", 666L);
 
-        el = graph.traversal().E().has("timestamp", current).toList();
+        el = graph.traversal().E().hasLabel("strike").has("timestamp", current).toList();
         Assert.assertEquals(0, el.size());
-        el = graph.traversal().E().has("timestamp", 666L).toList();
+        el = graph.traversal().E().hasLabel("strike").has("timestamp", 666L).toList();
         Assert.assertEquals(1, el.size());
         Assert.assertEquals(1, (int) el.get(0).value("id"));
     }
@@ -7205,11 +7504,11 @@ public class EdgeCoreTest extends BaseCoreTest {
                        "timestamp", current, "place", "park",
                        "tool", "shovel", "arrested", false);
 
-        List<Edge> el = graph.traversal().E().has("place", "park")
+        List<Edge> el = graph.traversal().E().hasLabel("strike").has("place", "park")
                              .toList();
         Assert.assertEquals(1, el.size());
         Assert.assertEquals(1, (int) el.get(0).value("id"));
-        el = graph.traversal().E().has("place", "park")
+        el = graph.traversal().E().hasLabel("strike").has("place", "park")
                   .has("tool", "shovel").toList();
         Assert.assertEquals(1, el.size());
         Assert.assertEquals(1, (int) el.get(0).value("id"));
@@ -7745,6 +8044,42 @@ public class EdgeCoreTest extends BaseCoreTest {
         if (commit) {
             graph.tx().commit();
         }
+    }
+
+    private Vertex initEdgeLabelQueryEdges() {
+        HugeGraph graph = graph();
+        SchemaManager schema = graph.schema();
+
+        schema.edgeLabel("reviewed").properties("time", "score")
+              .multiTimes().sortKeys("time")
+              .link("person", "book")
+              .enableLabelIndex(false)
+              .create();
+        schema.edgeLabel("recommended").properties("time", "score")
+              .multiTimes().sortKeys("time")
+              .link("person", "book")
+              .enableLabelIndex(false)
+              .create();
+        schema.indexLabel("reviewedByScore").onE("reviewed")
+              .secondary().by("score").create();
+
+        Vertex reader = graph.addVertex(T.label, "person",
+                                        "name", "edge-label-reader",
+                                        "city", "Beijing",
+                                        "age", 29);
+        Vertex book1 = graph.addVertex(T.label, "book",
+                                       "name", "edge-label-book-1");
+        Vertex book2 = graph.addVertex(T.label, "book",
+                                       "name", "edge-label-book-2");
+        Vertex book3 = graph.addVertex(T.label, "book",
+                                       "name", "edge-label-book-3");
+
+        reader.addEdge("reviewed", book1, "time", "2026-1-1", "score", 1);
+        reader.addEdge("recommended", book2, "time", "2026-1-1", "score", 2);
+        reader.addEdge("reviewed", book3, "time", "2026-1-2", "score", 3);
+
+        graph.tx().commit();
+        return reader;
     }
 
     private void init100LookEdges() {

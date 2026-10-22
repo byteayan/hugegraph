@@ -18,7 +18,7 @@
 
 # Dockerfile for HugeGraph PD
 # 1st stage: build source code
-FROM --platform=$BUILDPLATFORM maven:3.9.0-eclipse-temurin-11 AS build
+FROM --platform=$BUILDPLATFORM maven:3.9.16-eclipse-temurin-17 AS build
 
 WORKDIR /pkg
 
@@ -35,7 +35,7 @@ RUN --mount=type=cache,id=hugegraph-maven-${SOURCE_REVISION},target=/root/.m2,sh
 
 # 2nd stage: runtime env
 # Note: ZGC (The Z Garbage Collector) is only supported on ARM-Mac with java > 13
-FROM eclipse-temurin:11-jre-jammy
+FROM eclipse-temurin:17-jre-jammy
 
 LABEL maintainer="HugeGraph Docker Maintainers <dev@hugegraph.apache.org>"
 
@@ -60,11 +60,23 @@ RUN apt-get -q update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /pkg/hugegraph-pd/apache-hugegraph-pd-*/ /hugegraph-pd/
+# 2. Run as a fixed non-root user; USER must be numeric so Kubernetes can
+# verify runAsNonRoot.  The data and log directories exist in the image so
+# named volumes mounted there start out owned by that user.  See
+# docker/README.md before upgrading volumes written by an older image.
+ARG HG_UID=10001
+ARG HG_GID=10001
+RUN groupadd --system --gid "${HG_GID}" hugegraph \
+    && useradd --system --uid "${HG_UID}" --gid hugegraph --no-create-home \
+       --home-dir /hugegraph-pd --shell /usr/sbin/nologin hugegraph \
+    && install -d -o "${HG_UID}" -g "${HG_GID}" /hugegraph-pd /hugegraph-pd/pd_data /hugegraph-pd/logs
 
-# 2. Init docker script
-COPY hugegraph-pd/hg-pd-dist/docker/docker-entrypoint.sh .
-RUN chmod 755 ./docker-entrypoint.sh
+COPY --from=build --chown=${HG_UID}:${HG_GID} /pkg/hugegraph-pd/apache-hugegraph-pd-*/ /hugegraph-pd/
+
+# 3. Init docker script
+COPY --chown=${HG_UID}:${HG_GID} --chmod=755 hugegraph-pd/hg-pd-dist/docker/docker-entrypoint.sh .
+
+USER ${HG_UID}:${HG_GID}
 
 EXPOSE 8620
 VOLUME /hugegraph-pd
