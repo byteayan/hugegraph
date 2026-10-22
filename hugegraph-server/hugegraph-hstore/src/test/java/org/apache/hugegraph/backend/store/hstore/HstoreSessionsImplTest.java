@@ -20,17 +20,30 @@ package org.apache.hugegraph.backend.store.hstore;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 
-import org.apache.hugegraph.backend.store.BackendEntry.BackendColumn;
+import org.apache.hugegraph.backend.BackendColumn;
 import org.apache.hugegraph.backend.store.BackendEntry.BackendColumnIterator;
+import org.apache.hugegraph.config.HugeConfig;
+import org.apache.hugegraph.pd.client.PDClient;
+import org.apache.hugegraph.pd.common.PDException;
+import org.apache.hugegraph.pd.grpc.Metapb;
+import org.apache.hugegraph.store.HgStoreClient;
 import org.apache.hugegraph.store.HgKvEntry;
+import org.apache.hugegraph.store.HgStoreSession;
+import org.apache.hugegraph.store.HgOwnerKey;
+import org.apache.hugegraph.id.IdGenerator;
+import org.apache.hugegraph.serializer.OlapKey;
 import org.apache.hugegraph.store.HgKvIterator;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 public class HstoreSessionsImplTest {
 
@@ -43,6 +56,97 @@ public class HstoreSessionsImplTest {
             Assert.assertFalse(classFile.contains(
                              "org/apache/hugegraph/testutil/Assert"));
         }
+    }
+
+    @Test
+    public void testInitAfterClearRegistersGraphAgain() throws Exception {
+        String namespace = "hstore-clear-test-" + System.nanoTime();
+        String graphName = namespace + "/m";
+        PDClient pdClient = Mockito.mock(PDClient.class);
+        HgStoreClient storeClient = Mockito.mock(HgStoreClient.class);
+        Mockito.when(storeClient.openSession(Mockito.anyString()))
+               .thenAnswer(invocation -> Mockito.mock(HgStoreSession.class));
+        Mockito.when(storeClient.getPdClient()).thenReturn(pdClient);
+
+        Object[] saved = setStoreClients(pdClient, storeClient, Boolean.TRUE);
+        try {
+            HugeConfig config = new HugeConfig(Map.of());
+            HstoreStore store = new HstoreStore.HstoreSchemaStore(null, namespace, "m");
+
+            // initBackend(), then the graph opens the store to serve requests
+            store.open(config);
+            store.init();
+            store.open(config);
+            Mockito.verify(pdClient, Mockito.times(1)).setGraph(graph(graphName));
+
+            for (int i = 1; i <= 50; i++) {
+                // clearBackend(): the graph still holds the store, so its sessions stay open
+                store.open(config);
+                store.clear(true);
+                store.close();
+                // initBackend(): open() returns early on the open sessions, init() must
+                // register the graph PD deleted
+                store.open(config);
+                store.init();
+                store.close();
+
+                Mockito.verify(pdClient, Mockito.times(i)).delGraph(graphName);
+                Mockito.verify(pdClient, Mockito.times(i + 1)).setGraph(graph(graphName));
+            }
+        } finally {
+            setStoreClients(saved[0], saved[1], saved[2]);
+        }
+    }
+
+    @Test
+    public void testInitAfterFailedDeleteRegistersGraphAgain() throws Exception {
+        String namespace = "hstore-clear-test-" + System.nanoTime();
+        String graphName = namespace + "/m";
+        PDClient pdClient = Mockito.mock(PDClient.class);
+        Mockito.doThrow(new PDException(-1, "PD is not the leader"))
+               .when(pdClient).delGraph(graphName);
+        HgStoreClient storeClient = Mockito.mock(HgStoreClient.class);
+        Mockito.when(storeClient.openSession(Mockito.anyString()))
+               .thenAnswer(invocation -> Mockito.mock(HgStoreSession.class));
+        Mockito.when(storeClient.getPdClient()).thenReturn(pdClient);
+
+        Object[] saved = setStoreClients(pdClient, storeClient, Boolean.TRUE);
+        try {
+            HugeConfig config = new HugeConfig(Map.of());
+            HstoreStore store = new HstoreStore.HstoreSchemaStore(null, namespace, "m");
+            store.open(config);
+            store.init();
+
+            // The store side may be gone even though PD refused the delete
+            store.clear(true);
+            store.init();
+            Mockito.verify(pdClient, Mockito.times(2)).setGraph(graph(graphName));
+        } finally {
+            setStoreClients(saved[0], saved[1], saved[2]);
+        }
+    }
+
+    private static Metapb.Graph graph(String graphName) {
+        return Mockito.argThat(graph -> graph != null &&
+                                        graph.getGraphName().equals(graphName));
+    }
+
+    /**
+     * Swaps the PD and Store clients HstoreSessionsImpl keeps in static fields, so no real
+     * client is created, and returns the previous values
+     */
+    private static Object[] setStoreClients(Object pdClient, Object storeClient,
+                                            Object initialized) throws Exception {
+        String[] names = {"defaultPdClient", "hgStoreClient", "initializedNode"};
+        Object[] values = {pdClient, storeClient, initialized};
+        Object[] previous = new Object[names.length];
+        for (int i = 0; i < names.length; i++) {
+            Field field = HstoreSessionsImpl.class.getDeclaredField(names[i]);
+            field.setAccessible(true);
+            previous[i] = field.get(null);
+            field.set(null, values[i]);
+        }
+        return previous;
     }
 
     @Test
@@ -69,6 +173,30 @@ public class HstoreSessionsImplTest {
         iterator.next();
         Assert.assertFalse(iterator.hasNext());
         Assert.assertNull(iterator.position());
+    }
+
+    @Test
+    public void testExactOlapBatchUsesNativePointKeysAndOwnerRouting() {
+        byte[] vertexOwner = IdGenerator.of(9).asBytes();
+        byte[] namespaced = OlapKey.format(IdGenerator.of(9), IdGenerator.of(9));
+        List<HgOwnerKey> keys = List.of(HgOwnerKey.of(vertexOwner, namespaced));
+        int[] calls = {0};
+        HgStoreSession graph = (HgStoreSession) Proxy.newProxyInstance(HgStoreSession.class.getClassLoader(),
+                new Class<?>[]{HgStoreSession.class}, (proxy, method, args) -> {
+                    Assert.assertEquals("batchGetOwner", method.getName());
+                    Assert.assertEquals("g+olap", args[0]);
+                    Assert.assertSame(keys, args[1]);
+                    Assert.assertArrayEquals(vertexOwner, keys.get(0).getOwner());
+                    Assert.assertArrayEquals(namespaced, keys.get(0).getKey());
+                    calls[0]++;
+                    return List.of(new TestEntry(namespaced));
+                });
+        try (BackendColumnIterator result = HstoreSessionsImpl.getWithBatchExact(graph, "g+olap", keys)) {
+            Assert.assertTrue(result.hasNext());
+            Assert.assertArrayEquals(namespaced, result.next().name);
+            Assert.assertFalse(result.hasNext());
+        }
+        Assert.assertEquals(1, calls[0]);
     }
 
     private static BackendColumnIterator newColumnIterator(

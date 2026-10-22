@@ -28,28 +28,65 @@ import org.apache.hugegraph.pd.store.RaftKVStore;
  */
 public class MetadataFactory {
 
-    private static HgKVStore store = null;
+    private static HgKVStore store;
+    private static boolean shutdown;
 
-    public static HgKVStore getStore(PDConfig pdConfig) {
+    public static synchronized HgKVStore getStore(PDConfig pdConfig) {
+        if (shutdown) {
+            throw new IllegalStateException("PD metadata store has shut down");
+        }
         if (store == null) {
-            synchronized (MetadataFactory.class) {
-                if (store == null) {
-                    HgKVStore proto = new HgKVStoreImpl();
-                    //proto.init(pdConfig);
-                    store = pdConfig.getRaft().isEnable() ?
-                            new RaftKVStore(RaftEngine.getInstance(), proto) :
-                            proto;
-                    store.init(pdConfig);
+            HgKVStore proto = new HgKVStoreImpl();
+            HgKVStore candidate = pdConfig.getRaft().isEnable() ?
+                                  new RaftKVStore(RaftEngine.getInstance(), proto) : proto;
+            try {
+                candidate.init(pdConfig);
+                store = candidate;
+            } catch (RuntimeException | Error failure) {
+                try {
+                    candidate.close();
+                } catch (RuntimeException | Error cleanup) {
+                    if (cleanup != failure) {
+                        failure.addSuppressed(cleanup);
+                    }
                 }
+                throw failure;
             }
         }
         return store;
     }
 
-    public static void closeStore() {
+    /**
+     * Open the store like {@link #getStore}, and return it only when this call opened it.
+     */
+    public static synchronized HgKVStore openStore(PDConfig pdConfig) {
+        HgKVStore previous = store;
+        HgKVStore current = getStore(pdConfig);
+        return previous == null ? current : null;
+    }
+
+    /**
+     * Close a store that a failed startup opened, so its LOCK does not outlive the attempt.
+     * A store another caller has replaced it with stays open.
+     */
+    public static synchronized void discardStore(HgKVStore opened) {
+        if (opened != null && store == opened) {
+            store = null;
+            opened.close();
+        }
+    }
+
+    public static synchronized void closeStore() {
         if (store != null) {
             store.close();
         }
+    }
+
+    // Final service shutdown must not allow a late facade to create a new DB.
+    public static synchronized void shutdownStore() {
+        shutdown = true;
+        closeStore();
+        store = null;
     }
 
     public static StoreInfoMeta newStoreInfoMeta(PDConfig pdConfig) {

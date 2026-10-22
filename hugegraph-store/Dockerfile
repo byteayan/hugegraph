@@ -18,7 +18,7 @@
 
 # Dockerfile for HugeGraph Store
 # 1st stage: build source code
-FROM --platform=$BUILDPLATFORM maven:3.9.0-eclipse-temurin-11 AS build
+FROM --platform=$BUILDPLATFORM maven:3.9.16-eclipse-temurin-17 AS build
 
 WORKDIR /pkg
 
@@ -35,7 +35,8 @@ RUN --mount=type=cache,id=hugegraph-maven-${SOURCE_REVISION},target=/root/.m2,sh
 
 # 2nd stage: runtime env
 # Note: ZGC (The Z Garbage Collector) is only supported on ARM-Mac with java > 13
-FROM eclipse-temurin:11-jre-jammy
+FROM eclipse-temurin:17-jdk-jammy
+# Local Arthas attach requires the JDK attach and compiler modules.
 
 LABEL maintainer="HugeGraph Docker Maintainers <dev@hugegraph.apache.org>"
 

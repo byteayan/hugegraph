@@ -18,7 +18,9 @@
 package org.apache.hugegraph.api;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.hugegraph.testutil.Assert;
 import org.junit.Test;
@@ -29,6 +31,8 @@ public class MetricsApiTest extends BaseApiTest {
 
     private static final String PATH = "/metrics";
     private static final String STATISTICS_PATH = PATH + "/statistics";
+    private static final String GREMLIN_CHANNEL_METRICS_PREFIX =
+            "org_apache_tinkerpop_gremlin_server_GremlinServer_channels_";
 
     @Test
     public void testBaseMetricsAll() {
@@ -46,7 +50,21 @@ public class MetricsApiTest extends BaseApiTest {
     @Test
     public void testBaseMetricsPromAll() {
         Response r = client().get(PATH);
-        assertResponseStatus(200, r);
+        String result = assertResponseStatus(200, r);
+        Assert.assertContains(GREMLIN_CHANNEL_METRICS_PREFIX + "paused",
+                              result);
+        Assert.assertContains(GREMLIN_CHANNEL_METRICS_PREFIX + "total",
+                              result);
+        Assert.assertContains(GREMLIN_CHANNEL_METRICS_PREFIX +
+                              "write_pauses", result);
+
+        Set<String> typed = new HashSet<>();
+        for (String line : result.split("\n")) {
+            if (line.startsWith("# TYPE ")) {
+                String name = line.substring(7).split(" ")[0];
+                Assert.assertTrue(line, typed.add(name));
+            }
+        }
     }
 
     @Test
@@ -60,7 +78,12 @@ public class MetricsApiTest extends BaseApiTest {
     @Test
     public void testStatisticsMetricsPromAll() {
         Response r = client().get(STATISTICS_PATH);
-        assertResponseStatus(200, r);
+        String result = assertResponseStatus(200, r);
+        for (String line : result.split("\n")) {
+            if (!line.startsWith("#") && line.contains("{")) {
+                Assert.assertTrue(line, line.matches("\\S+\\{\\w+=\"[^\"]*\",} \\S+"));
+            }
+        }
     }
 
     @Test

@@ -23,14 +23,14 @@ import java.util.List;
 
 import org.apache.hugegraph.HugeFactory;
 import org.apache.hugegraph.HugeGraph;
-import org.apache.hugegraph.backend.BackendException;
-import org.apache.hugegraph.backend.id.IdGenerator;
-import org.apache.hugegraph.backend.query.ConditionQuery;
+import org.apache.hugegraph.exception.BackendException;
+import org.apache.hugegraph.id.IdGenerator;
+import org.apache.hugegraph.query.ConditionQuery;
 import org.apache.hugegraph.backend.tx.GraphTransaction;
-import org.apache.hugegraph.schema.EdgeLabel;
-import org.apache.hugegraph.schema.PropertyKey;
+import org.apache.hugegraph.struct.schema.EdgeLabel;
+import org.apache.hugegraph.struct.schema.PropertyKey;
 import org.apache.hugegraph.schema.SchemaManager;
-import org.apache.hugegraph.schema.VertexLabel;
+import org.apache.hugegraph.struct.schema.VertexLabel;
 import org.apache.hugegraph.testutil.Whitebox;
 import org.apache.hugegraph.traversal.optimize.Text;
 import org.apache.hugegraph.type.HugeType;
@@ -479,10 +479,10 @@ public class Example1 {
                                      .has("city", "Hangzhou").toList();
         assert vertices.isEmpty();
         // set breakpoint here to see secondary_indexes and range_indexes table
-        vertices = graph.traversal().V().has("age", 28).toList();
+        vertices = graph.traversal().V().hasLabel("person").has("age", 28).toList();
         assert vertices.isEmpty();
         // set breakpoint here to see secondary_indexes and range_indexes table
-        vertices = graph.traversal().V().has("city", "Hangzhou").toList();
+        vertices = graph.traversal().V().hasLabel("person").has("city", "Hangzhou").toList();
         assert vertices.isEmpty();
     }
 }

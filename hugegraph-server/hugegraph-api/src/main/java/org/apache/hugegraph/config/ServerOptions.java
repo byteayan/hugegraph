@@ -42,15 +42,6 @@ public class ServerOptions extends OptionHolder {
                     1
             );
 
-    public static final ConfigOption<Boolean> ENABLE_SERVER_ROLE_ELECTION =
-            new ConfigOption<>(
-                    "server.role_election",
-                    "Whether to enable role election, if enabled, the server " +
-                    "will elect a master node in the cluster.",
-                    disallowEmpty(),
-                    false
-            );
-
     public static final ConfigOption<Integer> MAX_WORKER_THREADS =
             new ConfigOption<>(
                     "restserver.max_worker_threads",
@@ -442,16 +433,32 @@ public class ServerOptions extends OptionHolder {
 
     public static final ConfigOption<String> ARTHAS_TELNET_PORT =
             new ConfigOption<>(
-                    "arthas.telnetPort",
+                    "arthas.telnet_port",
                     "arthas provides telnet ports to the outside",
+                    disallowEmpty(),
+                    "8562"
+            );
+
+    public static final ConfigOption<String> ARTHAS_TELNET_PORT_LEGACY =
+            new ConfigOption<>(
+                    "arthas.telnetPort",
+                    "Legacy alias: arthas provides telnet ports to the outside",
                     disallowEmpty(),
                     "8562"
             );
 
     public static final ConfigOption<String> ARTHAS_HTTP_PORT =
             new ConfigOption<>(
-                    "arthas.httpPort",
+                    "arthas.http_port",
                     "arthas provides http ports to the outside",
+                    disallowEmpty(),
+                    "8561"
+            );
+
+    public static final ConfigOption<String> ARTHAS_HTTP_PORT_LEGACY =
+            new ConfigOption<>(
+                    "arthas.httpPort",
+                    "Legacy alias: arthas provides http ports to the outside",
                     disallowEmpty(),
                     "8561"
             );
@@ -459,17 +466,25 @@ public class ServerOptions extends OptionHolder {
     public static final ConfigOption<String> ARTHAS_IP =
             new ConfigOption<>(
                     "arthas.ip",
-                    "arthas bound ip",
+                    "Arthas bind address; use loopback unless external access is intended",
                     disallowEmpty(),
-                    "0.0.0.0"
+                    "127.0.0.1"
             );
 
     public static final ConfigOption<String> ARTHAS_DISABLED_COMMANDS =
             new ConfigOption<>(
+                    "arthas.disabled_commands",
+                    "Optional comma-separated Arthas disabled commands, empty by default",
+                    null,
+                    ""
+            );
+
+    public static final ConfigOption<String> ARTHAS_DISABLED_COMMANDS_LEGACY =
+            new ConfigOption<>(
                     "arthas.disabledCommands",
-                    "arthas disabled commands",
-                    disallowEmpty(),
-                    "jad"
+                    "Legacy alias: optional comma-separated Arthas disabled commands",
+                    null,
+                    ""
             );
 
     public static final ConfigOption<Boolean> ALLOW_TRACE =
@@ -489,6 +504,11 @@ public class ServerOptions extends OptionHolder {
                     ""
             );
 
+    // TODO: accept the initial admin password from the environment (or document the properties
+    // contract): read through PropertiesConfiguration, the value is trimmed, backslash-unescaped
+    // and decoded as ISO-8859-1, so the stored password can differ from what the operator set.
+    // The Helm chart (helm/hugegraph) refuses padded, backslash or non-ASCII admin passwords in
+    // its schema and Server wrapper; relax that guard once the credential bypasses the file.
     public static final ConfigOption<String> ADMIN_PA =
             new ConfigOption<>(
                     "auth.admin_pa",

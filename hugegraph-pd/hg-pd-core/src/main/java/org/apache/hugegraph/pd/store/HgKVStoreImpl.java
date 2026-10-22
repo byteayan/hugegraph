@@ -43,6 +43,7 @@ import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.rocksdb.Slice;
+import org.rocksdb.Status;
 
 import com.alipay.sofa.jraft.util.Utils;
 import com.google.common.cache.CacheBuilder;
@@ -55,19 +56,30 @@ public class HgKVStoreImpl implements HgKVStore {
 
     private static final ConcurrentHashMap<String,
             ConcurrentMap<String, Object>> CACHE = new ConcurrentHashMap();
+    /*
+     * A restarted PD can start before the previous JVM has released the RocksDB LOCK.
+     * Wait about as long as stop-hugegraph-pd.sh waits for that JVM, then fail startup.
+     * Every attempt rotates the RocksDB info LOG, so back off between attempts. Only the
+     * metadata store waits: RaftStartup opens it before the raft log store, and a stopping
+     * PD releases the raft log LOCK before this one.
+     */
+    private static final long LOCK_WAIT_TIMEOUT_MS = 30_000L;
+    private static final long LOCK_RETRY_MIN_INTERVAL_MS = 500L;
+    private static final long LOCK_RETRY_MAX_INTERVAL_MS = 4_000L;
     private final ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
     private RocksDB db;
     private String dbPath;
     private Options dbOptions;
+    // Tests shorten this
+    private long lockWaitTimeoutMs = LOCK_WAIT_TIMEOUT_MS;
 
     @Override
     public void init(PDConfig config) {
-        dbOptions = new Options().setCreateIfMissing(true);
-
         final Lock writeLock = this.readWriteLock.writeLock();
         writeLock.lock();
         try {
-            this.dbPath = config.getDataPath() + "/rocksdb/";
+            this.dbOptions = new Options().setCreateIfMissing(true);
+            this.dbPath = config.getDataPath() + "/rocksdb";
             File file = new File(this.dbPath);
             if (!file.exists()) {
                 try {
@@ -76,9 +88,13 @@ public class HgKVStoreImpl implements HgKVStore {
                     log.warn("Failed to create data file,{}", e);
                 }
             }
-            openRocksDB(dbPath);
-        } catch (PDException e) {
-            log.error("Failed to open data file,{}", e);
+            openRocksDB(this.dbPath, this.lockWaitTimeoutMs);
+        } catch (PDException | RuntimeException | Error e) {
+            if (this.dbOptions != null) {
+                this.dbOptions.close();
+                this.dbOptions = null;
+            }
+            throw new IllegalStateException("Failed to open PD metadata at " + this.dbPath, e);
         } finally {
             writeLock.unlock();
         }
@@ -114,10 +130,10 @@ public class HgKVStoreImpl implements HgKVStore {
     public List<KV> scanPrefix(byte[] prefix) {
         final Lock readLock = this.readWriteLock.readLock();
         readLock.lock();
-        try (ReadOptions options = new ReadOptions()
-                .setIterateLowerBound(new Slice(prefix))) {
+        try (Slice bound = new Slice(prefix);
+             ReadOptions options = new ReadOptions().setIterateLowerBound(bound);
+             RocksIterator iterator = db.newIterator(options)) {
             List<KV> kvs = new ArrayList<>();
-            RocksIterator iterator = db.newIterator(options);
             iterator.seekToFirst();
             while (iterator.isValid() && 0 == Bytes.indexOf(iterator.key(), prefix)) {
                 kvs.add(new KV(iterator.key(), iterator.value()));
@@ -147,9 +163,9 @@ public class HgKVStoreImpl implements HgKVStore {
     public long removeByPrefix(byte[] prefix) throws PDException {
         final Lock readLock = this.readWriteLock.readLock();
         readLock.lock();
-        try (ReadOptions options = new ReadOptions()
-                .setIterateLowerBound(new Slice(prefix))) {
-            RocksIterator iterator = db.newIterator(options);
+        try (Slice bound = new Slice(prefix);
+             ReadOptions options = new ReadOptions().setIterateLowerBound(bound);
+             RocksIterator iterator = db.newIterator(options)) {
             iterator.seekToFirst();
 
             while (iterator.isValid()) {
@@ -304,11 +320,11 @@ public class HgKVStoreImpl implements HgKVStore {
     public List<KV> scanRange(byte[] start, byte[] end) {
         final Lock readLock = this.readWriteLock.readLock();
         readLock.lock();
-        try (ReadOptions options = new ReadOptions()
-                .setIterateLowerBound(new Slice(start))
-                .setIterateUpperBound(new Slice(end))) {
+        try (Slice lower = new Slice(start);
+             Slice upper = new Slice(end);
+             ReadOptions options = new ReadOptions().setIterateLowerBound(lower).setIterateUpperBound(upper);
+             RocksIterator iterator = db.newIterator(options)) {
             List<KV> kvs = new ArrayList<>();
-            RocksIterator iterator = db.newIterator(options);
             iterator.seekToFirst();
             while (iterator.isValid()) {
                 kvs.add(new KV(iterator.key(), iterator.value()));
@@ -322,7 +338,17 @@ public class HgKVStoreImpl implements HgKVStore {
 
     @Override
     public void close() {
-        closeRocksDB();
+        Lock writeLock = this.readWriteLock.writeLock();
+        writeLock.lock();
+        try {
+            closeRocksDB();
+            if (this.dbOptions != null) {
+                this.dbOptions.close();
+                this.dbOptions = null;
+            }
+        } finally {
+            writeLock.unlock();
+        }
     }
 
     private void closeRocksDB() {
@@ -333,11 +359,55 @@ public class HgKVStoreImpl implements HgKVStore {
     }
 
     private void openRocksDB(String dbPath) throws PDException {
-        try {
-            this.db = RocksDB.open(dbOptions, dbPath);
-        } catch (RocksDBException e) {
-            log.error("Failed to open RocksDB from {}", dbPath, e);
-            throw new PDException(Pdpb.ErrorType.ROCKSDB_LOAD_SNAPSHOT_ERROR_VALUE, e);
+        openRocksDB(dbPath, 0L);
+    }
+
+    private void openRocksDB(String dbPath, long lockWaitTimeoutMs) throws PDException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitTimeoutMs);
+        long interval = LOCK_RETRY_MIN_INTERVAL_MS;
+        boolean waited = false;
+        while (true) {
+            try {
+                this.db = RocksDB.open(this.dbOptions, dbPath);
+                if (waited) {
+                    log.info("Opened RocksDB at {} after its LOCK was released", dbPath);
+                }
+                return;
+            } catch (RocksDBException e) {
+                if (!isLockConflict(e) || System.nanoTime() - deadline >= 0) {
+                    log.error("Failed to open RocksDB from {}", dbPath, e);
+                    throw new PDException(Pdpb.ErrorType.ROCKSDB_LOAD_SNAPSHOT_ERROR_VALUE, e);
+                }
+                if (!waited) {
+                    log.warn("RocksDB LOCK at {} is held, probably by a previous PD that is " +
+                             "still stopping; retrying for up to {} ms: {}",
+                             dbPath, lockWaitTimeoutMs, e.getMessage());
+                    waited = true;
+                }
+                try {
+                    long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                    Thread.sleep(Math.max(1L, Math.min(interval, remainingMs)));
+                    interval = Math.min(interval * 2, LOCK_RETRY_MAX_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    e.addSuppressed(ie);
+                    throw new PDException(Pdpb.ErrorType.ROCKSDB_LOAD_SNAPSHOT_ERROR_VALUE, e);
+                }
+            }
         }
+    }
+
+    /**
+     * The LOCK is held by another process ("While lock file") or by another handle in this
+     * JVM ("lock hold by current process"). "While lock file" also covers a file system that
+     * cannot lock at all; that fails once the wait runs out. Other open failures, including a
+     * LOCK file that cannot be created, are not retried.
+     */
+    private static boolean isLockConflict(RocksDBException e) {
+        Status status = e.getStatus();
+        String message = e.getMessage();
+        return status != null && status.getCode() == Status.Code.IOError && message != null &&
+               (message.contains("While lock file") ||
+                message.contains("lock hold by current process"));
     }
 }

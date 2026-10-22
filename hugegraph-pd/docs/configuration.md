@@ -119,6 +119,9 @@ raft:
 |-----------|------|---------|-------------|
 | `raft.address` | String | `127.0.0.1:8610` | Raft service address for this PD node. Format: `<ip>:<port>`. Must be unique across all PD nodes. |
 | `raft.peers-list` | String | `127.0.0.1:8610` | Comma-separated list of all PD nodes' Raft addresses. Used for cluster formation and leader election. |
+| `raft.rpc-timeout` | Integer | `10000` | Timeout of a Raft RPC between PD nodes, in milliseconds. It is also the deadline of the ReadIndex wait PD runs before it reads an id counter: `getId` and `getCId` fail when the leader cannot confirm and apply a ReadIndex in this time, for example while a new leader is still committing its first entry. |
+| `raft.rpc-connect-timeout` | Integer | `1000` | Timeout for opening a connection to a peer, in milliseconds. A candidate opens its connections one peer at a time while it holds the Raft node lock, so an election waits this long for each peer that accepts the connection but does not answer (a stopped process, a lost host). It is the timeout of the Ping that opens a connection; requests on a connection that is already open use `raft.rpc-timeout`. |
+| `raft.rpc-install-snapshot-timeout` | Integer | `0` | Timeout for sending a snapshot to a follower that fell behind the log, in milliseconds. It bounds the transfer of the whole metadata store. `0` uses `raft.rpc-timeout`, the value this timeout had before it became a separate option; raise it if large snapshots time out. |
 
 **Critical Rules**:
 1. `raft.address` must be unique for each PD node
@@ -191,6 +194,8 @@ pd:
 
 **Production Recommendations**:
 - `pd.data-path`: Use dedicated SSD with at least 50GB free space
+  - PD opens its metadata RocksDB at `<pd.data-path>/rocksdb`. If its `LOCK` is still held, usually by a previous PD process that is still stopping, PD retries for up to 30 seconds and then fails startup. Run PD in the foreground (`-d false`) under a supervisor so that a failed start exits and is restarted.
+  - Never delete the `LOCK` files in `<pd.data-path>/rocksdb/` or `<pd.data-path>/pd_raft/log/` to get past this: while the previous process is alive, two processes then write the same database. Stop or kill the old process instead.
 - `pd.patrol-interval`:
   - Development: `300` (5 minutes) for fast testing
   - Production: `1800` (30 minutes) to reduce overhead
